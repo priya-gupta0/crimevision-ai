@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CrimeVision AI</title>
+<style>
+:root{--bg:#eceff2;--card:#fff;--ink:#14181f;--mute:#5a6575;--line:#d5dbe2;--tag:#f2b31b;--bad:#c4281c;--acc:#2a4766}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1318;--card:#171c23;--ink:#e6e9ee;--mute:#95a0af;--line:#2a313b;--tag:#f2b31b;--bad:#ff7a6e;--acc:#8fb4da}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "IBM Plex Sans","Segoe UI",system-ui,sans-serif}
+header{padding:18px 24px;border-bottom:3px solid var(--tag);background:var(--card)}
+h1{margin:0;font-size:22px;letter-spacing:-.01em}h2{margin:0 0 10px;font-size:16px}
+.mute{color:var(--mute);font-size:13px}
+main{max-width:1280px;margin:0 auto;padding:20px;display:grid;gap:16px}
+.cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media(max-width:900px){.cols{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:16px}
+button,input[type=text]{font:inherit;color:inherit;border:1px solid var(--line);border-radius:4px;padding:8px 12px;background:var(--card)}
+button{cursor:pointer;background:var(--acc);color:#fff;border-color:var(--acc)}
+@media(prefers-color-scheme:dark){button{color:#0f1318}}
+button:focus-visible,input:focus-visible{outline:2px solid var(--tag);outline-offset:2px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.verdict{font-size:26px;font-weight:600}
+ul{margin:6px 0;padding-left:20px}
+#tl{max-height:420px;overflow:auto;border-top:1px solid var(--line)}
+.ev{display:grid;grid-template-columns:52px 120px 1fr;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.ev b{font-variant-numeric:tabular-nums}.ev.weapon_detected{border-left:4px solid var(--bad);padding-left:8px}
+.tag{font-size:12px;color:var(--mute)}
+#cv{width:100%;height:320px;display:block;cursor:grab;touch-action:none}
+#lg span{margin-right:12px;font-size:12px;white-space:nowrap}#lg i{display:inline-block;width:10px;height:10px;margin-right:4px}
+#msgs{height:300px;overflow:auto;border:1px solid var(--line);border-radius:4px;padding:8px;margin-bottom:8px}
+.m{margin:0 0 10px;white-space:pre-wrap}.m.u{color:var(--acc);font-weight:600}
+a.btn{display:inline-block;padding:8px 12px;border-radius:4px;background:var(--tag);color:#14181f;text-decoration:none;font-weight:600}
+</style></head><body>
+<header><h1>CrimeVision AI</h1>
+<div class="mute">Forensic decision support. Every AI finding needs verification against the original evidence.</div></header>
+<main>
+<section class="card"><h2>Evidence</h2>
+<div class="row"><input type="file" id="files" multiple accept="image/*,video/*,audio/*"><button id="go">Analyze evidence</button></div>
+<p class="mute" id="st">Add images, video or audio, then analyze. Each file gets a SHA-256 hash on upload.</p></section>
+<div id="res" hidden>
+<div class="cols">
+<section class="card"><h2>Assessment</h2><div class="verdict" id="vd"></div><div class="mute" id="cf"></div>
+<p id="rs"></p><h2>Possible scenario</h2><p id="sc"></p><h2>Key findings</h2><ul id="kf"></ul>
+<h2>Limitations</h2><ul id="lm"></ul><a class="btn" id="pdf" href="#">Download PDF report</a></section>
+<section class="card"><h2>Evidence timeline in 3D</h2><canvas id="cv"></canvas><div id="lg"></div>
+<p class="mute">Drag to rotate. Horizontal axis is time, rows are event types, height is detector confidence.</p></section>
+</div>
+<div class="cols" style="margin-top:16px">
+<section class="card"><h2>Unified timeline</h2><div id="tl"></div></section>
+<section class="card"><h2>Ask the evidence</h2><div id="msgs"></div>
+<div class="row"><input type="text" id="q" style="flex:1" placeholder="Who is in frame when the knife appears?"><button id="send">Ask</button></div></section>
+</div></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $=s=>document.querySelector(s);
+const mmss=t=>t==null?'--:--':String(Math.floor(t/60)).padStart(2,'0')+':'+String(Math.floor(t%60)).padStart(2,'0');
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+let cid=null,timer=null,ok3d=null;
+$('#go').onclick=async()=>{
+  const f=$('#files').files;if(!f.length)return;
+  const fd=new FormData();for(const x of f)fd.append('files',x);
+  $('#st').textContent='Uploading\u2026';
+  const r=await fetch('/api/cases',{method:'POST',body:fd});const j=await r.json();
+  if(!r.ok){$('#st').textContent=j.error||'Upload failed.';return}
+  cid=j.id;$('#res').hidden=true;poll();
+};
+async function poll(){
+  const c=await(await fetch('/api/cases/'+cid)).json();
+  if(c.status==='processing'){$('#st').textContent=(c.progress||'Processing')+'\u2026';clearTimeout(timer);timer=setTimeout(poll,2000);return}
+  if(c.status==='error'){$('#st').textContent='Analysis failed: '+c.error;return}
+  $('#st').textContent='Done. Case '+c.id;render(c);
+}
+function list(ul,items){ul.replaceChildren(...(items||[]).map(x=>el('li',null,x)))}
+function render(c){
+  const s=c.summary||{};$('#res').hidden=false;
+  $('#vd').textContent=s.crime_type||'Inconclusive';
+  $('#cf').textContent='Model confidence '+Math.round((s.confidence||0)*100)+'% (not a probability of guilt or fact)';
+  $('#rs').textContent=s.reasoning||'';$('#sc').textContent=s.scenario||'';
+  list($('#kf'),s.key_findings);list($('#lm'),s.limitations);
+  $('#pdf').href='/api/cases/'+c.id+'/report';
+  const tl=$('#tl');tl.replaceChildren(...c.timeline.map(e=>{
+    const r=el('div','ev '+e.type);r.append(el('b',null,mmss(e.t)),el('span','tag',e.source+' \u00b7 '+e.type),el('span',null,e.text));return r}));
+  const m=$('#msgs');m.replaceChildren(...c.chat.map(x=>el('p','m '+(x.role==='user'?'u':''),x.content)));
+  if(ok3d===null)ok3d=init3d();if(ok3d)draw3d(c.timeline);
+}
+async function ask(){
+  const q=$('#q').value.trim();if(!q||!cid)return;$('#q').value='';
+  const m=$('#msgs');m.append(el('p','m u',q));const w=el('p','m','Thinking\u2026');m.append(w);m.scrollTop=m.scrollHeight;
+  const r=await fetch('/api/cases/'+cid+'/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({q})});
+  const j=await r.json();w.textContent=r.ok?j.answer:(j.error||'Request failed.');m.scrollTop=m.scrollHeight;
+}
+$('#send').onclick=ask;$('#q').onkeydown=e=>{if(e.key==='Enter')ask()};
+// 3D timeline
+const COL={weapon_detected:0xc4281c,high_motion:0xf79009,people_change:0x2e90fa,object_appeared:0x667085,scene_caption:0x12b76a,scene_class:0x12b76a,speech:0x7a5af8,note:0x98a2b3};
+let R,S,C,G,rx=-.5,ry=.6,drag=null;
+function init3d(){
+  const cv=$('#cv');
+  try{R=new THREE.WebGLRenderer({canvas:cv,antialias:true,alpha:true})}catch(e){cv.replaceWith(el('p','mute','3D view needs WebGL, which is unavailable here.'));return false}
+  S=new THREE.Scene();C=new THREE.PerspectiveCamera(50,2,.1,100);C.position.set(0,0,16);G=new THREE.Group();S.add(G);
+  S.add(new THREE.AmbientLight(0xffffff,.7));const L=new THREE.DirectionalLight(0xffffff,.8);L.position.set(5,8,10);S.add(L);
+  cv.onpointerdown=e=>{drag=[e.clientX,e.clientY];cv.setPointerCapture(e.pointerId)};
+  cv.onpointermove=e=>{if(!drag)return;ry+=(e.clientX-drag[0])*.01;rx+=(e.clientY-drag[1])*.01;drag=[e.clientX,e.clientY]};
+  cv.onpointerup=()=>drag=null;
+  (function loop(){const w=cv.clientWidth,h=cv.clientHeight;
+    if(cv.width!==w||cv.height!==h){R.setSize(w,h,false);C.aspect=w/h;C.updateProjectionMatrix()}
+    if(!drag&&!matchMedia('(prefers-reduced-motion: reduce)').matches)ry+=.003;
+    G.rotation.set(rx,ry,0);R.render(S,C);requestAnimationFrame(loop)})();
+  return true;
+}
+function draw3d(tl){
+  while(G.children.length)G.remove(G.children[0]);
+  const ev=tl.filter(e=>e.t!=null);const lanes=[...new Set(ev.map(e=>e.type))];
+  const maxT=Math.max(1,...ev.map(e=>e.t));
+  ev.forEach(e=>{
+    const h=Math.max(.3,(e.score||.5)*3);
+    const m=new THREE.Mesh(new THREE.BoxGeometry(.3,.3,h),new THREE.MeshLambertMaterial({color:COL[e.type]||0x667085}));
+    m.position.set(e.t/maxT*12-6,(lanes.indexOf(e.type)-(lanes.length-1)/2)*1.1,h/2);G.add(m)});
+  $('#lg').replaceChildren(...lanes.map(l=>{const s=el('span',null,l.replace('_',' '));const i=el('i');i.style.background='#'+(COL[l]||0x667085).toString(16).padStart(6,'0');s.prepend(i);return s}));
+  if(!ev.length)$('#lg').textContent='No timed events yet. Add video or audio for a 3D timeline.';
+}
+</script></body></html>
